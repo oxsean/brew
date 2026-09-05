@@ -19,7 +19,7 @@ class CurlPostDownloadStrategy < CurlDownloadStrategy
       escape_data = ->(d) { ["-d", URI.encode_www_form([d])] }
       [url, *meta[:data].flat_map(&escape_data)]
     else
-      url, query = url.split("?", 2)
+      url, query = expand_declared_deferred_environment(url).split("?", 2)
       query.nil? ? [url, "-X", "POST"] : [url, "-d", query]
     end
 

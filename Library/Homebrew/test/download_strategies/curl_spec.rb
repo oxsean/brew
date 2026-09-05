@@ -231,6 +231,147 @@ RSpec.describe CurlDownloadStrategy do
       end
     end
 
+    context "when a redirect target carries a deferred secret placeholder" do
+      let(:redirect_url) do
+        "https://attacker.example.org/foo.tar.gz?t=" \
+          "#{EnvSensitive::DEFERRED_PLACEHOLDER_PREFIX}HOMEBREW_PRIVATE_TOKEN" \
+          "#{EnvSensitive::DEFERRED_PLACEHOLDER_SUFFIX}"
+      end
+
+      before do
+        ENV["HOMEBREW_PRIVATE_TOKEN"] = "glpat-secret"
+        strategy.allow_deferred_environment_expansion!
+        allow(strategy).to receive(:resolve_url_basename_time_file_size)
+          .and_return([redirect_url, "foo.tar.gz", nil, 0, nil, true])
+      end
+
+      it "refuses to expand a placeholder that arrived over the network" do
+        expect { strategy.fetch }.to raise_error(CurlDownloadStrategyError, /server-supplied URL/)
+      end
+    end
+
+    context "when a same-host redirect target carries a declared placeholder" do
+      let(:specs) do
+        {
+          headers: ["PRIVATE-TOKEN: #{EnvSensitive::DEFERRED_PLACEHOLDER_PREFIX}" \
+                    "HOMEBREW_PRIVATE_TOKEN#{EnvSensitive::DEFERRED_PLACEHOLDER_SUFFIX}"],
+        }
+      end
+      let(:redirect_url) do
+        "https://example.com/elsewhere/foo.tar.gz?t=" \
+          "#{EnvSensitive::DEFERRED_PLACEHOLDER_PREFIX}HOMEBREW_PRIVATE_TOKEN" \
+          "#{EnvSensitive::DEFERRED_PLACEHOLDER_SUFFIX}"
+      end
+
+      before do
+        ENV["HOMEBREW_PRIVATE_TOKEN"] = "glpat-secret"
+        strategy.allow_deferred_environment_expansion!
+        allow(strategy).to receive(:resolve_url_basename_time_file_size)
+          .and_return([redirect_url, "foo.tar.gz", nil, 0, nil, true])
+      end
+
+      it "refuses a URL the server chose even on a declared host" do
+        expect { strategy.fetch }.to raise_error(CurlDownloadStrategyError, /server-supplied URL/)
+      end
+    end
+
+    context "when a placeholder is declared only for a mirror on another host" do
+      let(:specs) do
+        {
+          mirrors: ["https://mirror.example.org/foo.tar.gz?t=" \
+                    "#{EnvSensitive::DEFERRED_PLACEHOLDER_PREFIX}HOMEBREW_PRIVATE_TOKEN" \
+                    "#{EnvSensitive::DEFERRED_PLACEHOLDER_SUFFIX}"],
+        }
+      end
+      let(:redirect_url) do
+        "https://example.com/elsewhere/foo.tar.gz?t=" \
+          "#{EnvSensitive::DEFERRED_PLACEHOLDER_PREFIX}HOMEBREW_PRIVATE_TOKEN" \
+          "#{EnvSensitive::DEFERRED_PLACEHOLDER_SUFFIX}"
+      end
+
+      before do
+        ENV["HOMEBREW_PRIVATE_TOKEN"] = "glpat-secret"
+        strategy.allow_deferred_environment_expansion!
+        allow(strategy).to receive(:resolve_url_basename_time_file_size)
+          .and_return([redirect_url, "foo.tar.gz", nil, 0, nil, true])
+      end
+
+      it "does not send a mirror's secret to the primary host" do
+        expect { strategy.fetch }.to raise_error(CurlDownloadStrategyError, /server-supplied URL/)
+      end
+    end
+
+    context "when a same-host redirect extends the declared URL" do
+      let(:url) do
+        "https://example.com/foo.tar.gz?t=" \
+          "#{EnvSensitive::DEFERRED_PLACEHOLDER_PREFIX}HOMEBREW_PRIVATE_TOKEN" \
+          "#{EnvSensitive::DEFERRED_PLACEHOLDER_SUFFIX}"
+      end
+      let(:redirect_url) { "#{url}&download=1" }
+
+      before do
+        ENV["HOMEBREW_PRIVATE_TOKEN"] = "glpat-secret"
+        strategy.allow_deferred_environment_expansion!
+        allow(strategy).to receive(:resolve_url_basename_time_file_size)
+          .and_return([redirect_url, "foo.tar.gz", nil, 0, nil, true])
+      end
+
+      it "refuses a URL that merely extends the declaration" do
+        expect { strategy.fetch }.to raise_error(CurlDownloadStrategyError, /server-supplied URL/)
+      end
+    end
+
+    context "when the declared URL embeds another absolute URL" do
+      let(:url) do
+        "https://example.com/get?file=https://files.other.test/foo.tar.gz?sig=1&token=" \
+          "#{EnvSensitive::DEFERRED_PLACEHOLDER_PREFIX}HOMEBREW_PRIVATE_TOKEN" \
+          "#{EnvSensitive::DEFERRED_PLACEHOLDER_SUFFIX}"
+      end
+      let(:redirect_url) do
+        "https://files.other.test/foo.tar.gz?sig=1&token=" \
+          "#{EnvSensitive::DEFERRED_PLACEHOLDER_PREFIX}HOMEBREW_PRIVATE_TOKEN" \
+          "#{EnvSensitive::DEFERRED_PLACEHOLDER_SUFFIX}"
+      end
+
+      before do
+        ENV["HOMEBREW_PRIVATE_TOKEN"] = "glpat-secret"
+        strategy.allow_deferred_environment_expansion!
+        allow(strategy).to receive(:resolve_url_basename_time_file_size)
+          .and_return([redirect_url, "foo.tar.gz", nil, 0, nil, true])
+      end
+
+      it "does not send the secret to the embedded host" do
+        expect { strategy.fetch }.to raise_error(CurlDownloadStrategyError, /server-supplied URL/)
+      end
+    end
+
+    context "when a same-host mirror declares the secret and the URL does not" do
+      let(:mirror_url) do
+        "https://example.com/foo.tar.gz?token=" \
+          "#{EnvSensitive::DEFERRED_PLACEHOLDER_PREFIX}HOMEBREW_PRIVATE_TOKEN" \
+          "#{EnvSensitive::DEFERRED_PLACEHOLDER_SUFFIX}"
+      end
+      let(:specs) { { mirrors: [mirror_url] } }
+
+      before do
+        ENV["HOMEBREW_PRIVATE_TOKEN"] = "glpat-secret"
+        strategy.allow_deferred_environment_expansion!
+        allow(strategy).to receive(:resolve_url_basename_time_file_size)
+          .and_return([mirror_url, "foo.tar.gz", nil, 0, nil, false])
+      end
+
+      it "expands the secret the mirror declared" do
+        seen = []
+        allow(strategy).to receive(:system_command) do |_command, options|
+          seen.concat(options[:args])
+          instance_double(SystemCommand::Result, success?: true, stdout: "", assert_success!: nil)
+        end
+        strategy.fetch
+
+        expect(seen).to include(a_string_including("token=glpat-secret"))
+      end
+    end
+
     context "with artifact_domain set" do
       let(:artifact_domain) { "https://mirror.example.com/oci" }
 
@@ -360,6 +501,30 @@ RSpec.describe CurlDownloadStrategy do
               .and_return(nil)
 
             strategy.fetch
+          end
+        end
+
+        context "when the declared URL carries a deferred secret" do
+          let(:url) do
+            "https://#{GitHubPackages::URL_DOMAIN}/#{resource_path}?t=" \
+              "#{EnvSensitive::DEFERRED_PLACEHOLDER_PREFIX}HOMEBREW_PRIVATE_TOKEN" \
+              "#{EnvSensitive::DEFERRED_PLACEHOLDER_SUFFIX}"
+          end
+
+          before do
+            ENV["HOMEBREW_PRIVATE_TOKEN"] = "glpat-secret"
+            strategy.allow_deferred_environment_expansion!
+          end
+
+          it "expands it in Homebrew's own rewrite of that URL" do
+            seen = []
+            allow(strategy).to receive(:system_command) do |_command, options|
+              seen.concat(options[:args])
+              instance_double(SystemCommand::Result, success?: true, stdout: "", assert_success!: nil)
+            end
+            strategy.fetch
+
+            expect(seen).to include("#{artifact_domain}/#{resource_path}?t=glpat-secret")
           end
         end
 

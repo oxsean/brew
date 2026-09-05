@@ -62,6 +62,29 @@ RSpec.describe CurlPostDownloadStrategy do
       end
     end
 
+    context "with a deferred HOMEBREW_ secret in the URL query" do
+      let(:specs) { { using: :post } }
+      let(:url) do
+        ENV["HOMEBREW_PRIVATE_TOKEN"] = "glpat-secret"
+        ENV.clear_sensitive_environment_for_eval! do
+          "https://example.com/foo.tar.gz?private_token=#{ENV.fetch("HOMEBREW_PRIVATE_TOKEN", nil)}"
+        end
+      end
+
+      it "expands the secret in the query that `_fetch` splits into `-d`" do
+        strategy.allow_deferred_environment_expansion!
+        expect(strategy).to receive(:system_command)
+          .with(
+            /curl/,
+            hash_including(args: array_including_cons("-d", "private_token=glpat-secret")),
+          )
+          .at_least(:once)
+          .and_return(instance_double(SystemCommand::Result, success?: true, stdout: "", assert_success!: nil))
+
+        strategy.fetch
+      end
+    end
+
     context "with :using but no :data" do
       let(:specs) { { using: :post } }
 

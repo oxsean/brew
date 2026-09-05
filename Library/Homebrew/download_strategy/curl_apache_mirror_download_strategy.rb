@@ -44,7 +44,8 @@ class CurlApacheMirrorDownloadStrategy < CurlDownloadStrategy
   def apache_mirrors
     return @apache_mirrors if @apache_mirrors
 
-    json = curl_output("--silent", "--location", "#{url}&asjson=1").stdout
+    json = curl_output("--silent", "--location",
+                       "#{expand_declared_deferred_environment(url)}&asjson=1").stdout
     mirrors = JSON.parse(json)
     @apache_mirrors = T.let(mirrors, T.nilable(T::Hash[String, T.untyped]))
     mirrors

@@ -45,23 +45,8 @@ class CurlDownloadStrategy < AbstractFileDownloadStrategy
 
       urls = [url, *mirrors]
 
-      if (domain = Homebrew::EnvConfig.artifact_domain)
-        domain = domain.chomp("/")
-        # If the artifact domain already contains the Docker Registry API's
-        # `/v2/` path (e.g. an OCI registry proxying ghcr.io under a repository
-        # prefix: https://mirror.example.com/v2/ghcr-io), skip the `v2/` from
-        # the original URL rather than producing a duplicate `/v2/`.
-        # Keep this in sync with the portable-ruby URL handling in
-        # Library/Homebrew/cmd/vendor-install.sh.
-        domain_contains_v2 = %r{\Ahttps?://[^/]+/v2(?:/|\z)}.match?(domain)
-
-        artifact_urls = urls.map do |u|
-          if domain_contains_v2
-            u.sub(%r{^https?://#{GitHubPackages::URL_DOMAIN}/v2/}o, "#{domain}/")
-          else
-            u.sub(%r{^https?://#{GitHubPackages::URL_DOMAIN}/}o, "#{domain}/")
-          end
-        end
+      if Homebrew::EnvConfig.artifact_domain.present?
+        artifact_urls = urls.map { |u| artifact_domain_url(u) }
 
         urls = if Homebrew::EnvConfig.artifact_domain_no_fallback?
           artifact_urls
@@ -313,8 +298,56 @@ class CurlDownloadStrategy < AbstractFileDownloadStrategy
   def expand_deferred_environment_args(args)
     return args unless @expand_deferred_environment
 
+    # Only values written in the DSL. `@mirrors` rather than `mirrors`, which a subclass may resolve over the
+    # network. Homebrew's own artifact-domain rewrite of each counts too.
+    declared_urls = [url, *@mirrors]
+    declared = [*declared_urls, *declared_urls.map { |u| artifact_domain_url(u) },
+                *meta.fetch(:headers, [])]
+
     with_context(deferred_environment_expansion: true) do
-      args.map { |arg| ENV.expand_deferred_environment(arg) }
+      args.map do |arg|
+        next arg unless arg.include?(EnvSensitive::DEFERRED_PLACEHOLDER_PREFIX)
+        # Only a declaration verbatim. A strategy that derives an argument from
+        # one expands it with `expand_declared_deferred_environment` first, so a
+        # placeholder still here came from the network.
+        next ENV.expand_deferred_environment(arg) if declared.include?(arg)
+
+        raise CurlDownloadStrategyError.new(
+          url, "Refusing to expand a deferred secret into a server-supplied URL."
+        )
+      end
+    end
+  end
+
+  # Homebrew's own rewrite of a URL onto `$HOMEBREW_ARTIFACT_DOMAIN`, returned
+  # unchanged when no domain is set or the URL is not a GitHub Packages one.
+  sig { params(url: String).returns(String) }
+  def artifact_domain_url(url)
+    domain = Homebrew::EnvConfig.artifact_domain
+    return url if domain.blank?
+
+    domain = domain.chomp("/")
+    # If the artifact domain already contains the Docker Registry API's `/v2/`
+    # path (e.g. an OCI registry proxying ghcr.io under a repository prefix:
+    # https://mirror.example.com/v2/ghcr-io), skip the `v2/` from the original
+    # URL rather than producing a duplicate `/v2/`.
+    # Keep this in sync with the portable-ruby URL handling in
+    # Library/Homebrew/cmd/vendor-install.sh.
+    if %r{\Ahttps?://[^/]+/v2(?:/|\z)}.match?(domain)
+      url.sub(%r{^https?://#{GitHubPackages::URL_DOMAIN}/v2/}o, "#{domain}/")
+    else
+      url.sub(%r{^https?://#{GitHubPackages::URL_DOMAIN}/}o, "#{domain}/")
+    end
+  end
+
+  # Expand a value the formula or cask declared, for a strategy that needs to
+  # derive a `curl` argument from it rather than pass it through unchanged.
+  sig { params(value: String).returns(String) }
+  def expand_declared_deferred_environment(value)
+    return value unless @expand_deferred_environment
+
+    with_context(deferred_environment_expansion: true) do
+      ENV.expand_deferred_environment(value)
     end
   end
 
